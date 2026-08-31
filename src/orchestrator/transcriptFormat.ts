@@ -33,11 +33,22 @@ export function renderTranscript(
   return rendered;
 }
 
+/**
+ * True only if `keyword` appears as a standalone line (after trimming whitespace) — not
+ * merely mentioned inline. A naive `text.includes(keyword)` false-positives whenever a
+ * model quotes or references the control keyword while explaining that it does *not*
+ * apply yet (e.g. "...I'll approve it with `<<DESIGN_APPROVED>>` once posted" — observed
+ * empirically), which would wrongly fire a phase transition.
+ */
+export function hasControlLine(text: string, keyword: string): boolean {
+  return text.split(/\r?\n/).some((line) => line.trim() === keyword);
+}
+
 export function buildPromptForTurn(
   personaBody: string,
   task: string,
   transcript: TranscriptEntry[],
-  stopKeyword: string,
+  closingInstruction: string | null,
 ): string {
   return [
     personaBody,
@@ -46,7 +57,18 @@ export function buildPromptForTurn(
     "",
     "## Conversation so far",
     renderTranscript(transcript) || "(no messages yet — you are speaking first)",
-    "",
-    `When you believe the discussion has reached a satisfactory conclusion for the current task, end your reply with the exact line \`${stopKeyword}\` on its own line. Otherwise, just contribute your turn — do not restate the whole conversation.`,
+    ...(closingInstruction ? ["", closingInstruction] : []),
   ].join("\n");
+}
+
+export function stopKeywordInstruction(stopKeyword: string): string {
+  return `When you believe the discussion has reached a satisfactory conclusion for the current task, end your reply with the exact line \`${stopKeyword}\` on its own line, alone (not quoted or explained). Otherwise, just contribute your turn — do not restate the whole conversation.`;
+}
+
+export function designApprovalInstruction(designApprovalKeyword: string): string {
+  return `Once the Manager (not the Designer) is satisfied the plan is ready to build, the Manager should end their reply with the exact line \`${designApprovalKeyword}\` on its own line, alone (not quoted or explained) — this hands the plan to the Workers. Otherwise, just contribute your turn.`;
+}
+
+export function workDoneInstruction(stopKeyword: string): string {
+  return `When your assigned work (and peer-review pass) is complete, end your reply with the exact line \`${stopKeyword}\` on its own line, alone (not quoted or explained) — this moves the round to Review. Otherwise, just contribute your turn.`;
 }

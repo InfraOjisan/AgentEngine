@@ -5,7 +5,8 @@ import type { AgentConfig, TeamConfig } from "../agents/types.js";
 import { detectAll } from "../harnesses/registry.js";
 import { RoundRobinSelector } from "../orchestrator/turnSelector.js";
 import { runSession } from "../orchestrator/session.js";
-import { SessionBus, type TranscriptEntry } from "../orchestrator/types.js";
+import { runPhasedSession } from "../orchestrator/phasedSession.js";
+import { SessionBus, type SessionPhase, type TranscriptEntry } from "../orchestrator/types.js";
 import {
   appendTranscriptEntry,
   createSessionDir,
@@ -56,9 +57,9 @@ async function prepareRun(task: string, opts: RunOptions): Promise<PreparedRun> 
 const ROLE_COLORS: Record<string, ChalkInstance> = {
   manager: chalk.cyan,
   designer: chalk.blue,
-  "builder-qwen": chalk.green,
-  "builder-pi": chalk.magenta,
-  "builder-opencode": chalk.cyanBright,
+  "worker-qwen": chalk.green,
+  "worker-pi": chalk.magenta,
+  "worker-opencode": chalk.cyanBright,
   reviewer: chalk.yellow,
   "security-advisor": chalk.red,
 };
@@ -83,24 +84,33 @@ function printEntry(entry: TranscriptEntry): void {
   }
 }
 
+const PHASE_LABELS: Record<SessionPhase, string> = {
+  design: "① 設計 (manager ⇔ designer)",
+  work: "② 実装 (worker round-robin)",
+  review: "③ レビュー・セキュリティ監査 (並列)",
+};
+
 /** Non-interactive fallback: plain console output, no live input box. Used automatically
  *  when stdout/stdin isn't a TTY (piped, CI, this repo's own automated smoke tests), and
- *  always available directly for scripting. */
+ *  always available directly for scripting. Human approval in "phased" mode is treated as
+ *  auto-satisfied here since there's no live human to ask (see phasedSession.ts). */
 export async function runRunConsole(task: string, opts: RunOptions = {}): Promise<void> {
   const { config, agents, sessionPaths } = await prepareRun(task, opts);
 
   const bus = new SessionBus();
   bus.on("entry-added", printEntry);
-  bus.on("status-changed", (status) => {
-    if (status) {
-      console.log(
-        chalk.dim(
-          `\n▶ ${status.agent.displayName ?? status.agent.role} (${status.agent.harness}${
-            status.agent.model ? `/${status.agent.model}` : ""
-          }) is thinking...`,
-        ),
-      );
-    }
+  bus.on("turn-started", (agent) => {
+    console.log(
+      chalk.dim(
+        `\n▶ ${agent.displayName ?? agent.role} (${agent.harness}${agent.model ? `/${agent.model}` : ""}) is thinking...`,
+      ),
+    );
+  });
+  bus.on("phase-changed", ({ phase, cycle }) => {
+    console.log(chalk.bold.dim(`\n─── サイクル${cycle} — ${PHASE_LABELS[phase]} ───`));
+  });
+  bus.on("session-end", ({ reason }) => {
+    console.log(chalk.dim(`\nSession ended (${reason}).`));
   });
 
   const controller = new AbortController();
@@ -109,17 +119,20 @@ export async function runRunConsole(task: string, opts: RunOptions = {}): Promis
 
   let transcript: TranscriptEntry[] = [];
   try {
-    transcript = await runSession({
+    const common = {
       task,
       team: agents,
       config,
       workspaceDir: sessionPaths.workspaceDir,
-      turnSelector: new RoundRobinSelector(),
       bus,
       drainPendingUserMessages: () => [],
       signal: controller.signal,
-      onEntry: (entry) => appendTranscriptEntry(sessionPaths, entry),
-    });
+      onEntry: (entry: TranscriptEntry) => appendTranscriptEntry(sessionPaths, entry),
+    };
+    transcript =
+      config.orchestration === "phased"
+        ? await runPhasedSession({ ...common, interactive: false })
+        : await runSession({ ...common, turnSelector: new RoundRobinSelector() });
   } finally {
     process.off("SIGINT", sigintHandler);
     await writeTranscriptMarkdown(sessionPaths, transcript);

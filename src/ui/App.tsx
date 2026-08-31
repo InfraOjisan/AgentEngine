@@ -5,7 +5,8 @@ import TextInput from "ink-text-input";
 import type { AgentConfig, TeamConfig } from "../agents/types.js";
 import { RoundRobinSelector } from "../orchestrator/turnSelector.js";
 import { runSession } from "../orchestrator/session.js";
-import { SessionBus, type SessionEndReason, type StatusEvent, type TranscriptEntry } from "../orchestrator/types.js";
+import { runPhasedSession } from "../orchestrator/phasedSession.js";
+import { SessionBus, type SessionEndReason, type SessionPhase, type TranscriptEntry } from "../orchestrator/types.js";
 import { appendTranscriptEntry, writeTranscriptMarkdown, type SessionPaths } from "../orchestrator/persistence.js";
 import { colorNameForRole } from "./colors.js";
 
@@ -15,6 +16,17 @@ export interface AppProps {
   config: TeamConfig;
   sessionPaths: SessionPaths;
 }
+
+interface RunningTurn {
+  agent: AgentConfig;
+  startedAt: number;
+}
+
+const PHASE_LABELS: Record<SessionPhase, string> = {
+  design: "① 設計 (manager ⇔ designer)",
+  work: "② 実装 (worker round-robin)",
+  review: "③ レビュー・セキュリティ監査 (並列)",
+};
 
 function ElapsedTimer({ startedAt }: { startedAt: number }): React.ReactElement {
   const [, forceTick] = useState(0);
@@ -43,13 +55,15 @@ function TranscriptLine({ entry }: { entry: TranscriptEntry }): React.ReactEleme
 export function App({ task, team, config, sessionPaths }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
-  const [status, setStatus] = useState<StatusEvent | null>(null);
+  const [running, setRunning] = useState<Map<string, RunningTurn>>(new Map());
+  const [phaseInfo, setPhaseInfo] = useState<{ phase: SessionPhase; cycle: number } | null>(null);
   const [input, setInput] = useState("");
   const [ended, setEnded] = useState<SessionEndReason | null>(null);
   const pendingRef = useRef<string[]>([]);
   const abortControllerRef = useRef(new AbortController());
   const startedRef = useRef(false);
   const interactive = Boolean(process.stdin.isTTY);
+  const isPhased = config.orchestration === "phased";
 
   useEffect(() => {
     if (startedRef.current) return; // guard against a double-invoke under React StrictMode-like re-renders
@@ -57,24 +71,40 @@ export function App({ task, team, config, sessionPaths }: AppProps): React.React
 
     const bus = new SessionBus();
     bus.on("entry-added", (entry) => setEntries((prev) => [...prev, entry]));
-    bus.on("status-changed", (s) => setStatus(s));
+    bus.on("turn-started", (agent, startedAt) => {
+      setRunning((prev) => new Map(prev).set(agent.id, { agent, startedAt }));
+    });
+    bus.on("turn-ended", (agentId) => {
+      setRunning((prev) => {
+        if (!prev.has(agentId)) return prev;
+        const next = new Map(prev);
+        next.delete(agentId);
+        return next;
+      });
+    });
+    bus.on("phase-changed", (info) => setPhaseInfo(info));
     bus.on("session-end", ({ reason }) => setEnded(reason));
 
-    void runSession({
+    const drainPendingUserMessages = () => {
+      const drained = pendingRef.current;
+      pendingRef.current = [];
+      return drained;
+    };
+    const common = {
       task,
       team,
       config,
       workspaceDir: sessionPaths.workspaceDir,
-      turnSelector: new RoundRobinSelector(),
       bus,
-      drainPendingUserMessages: () => {
-        const drained = pendingRef.current;
-        pendingRef.current = [];
-        return drained;
-      },
+      drainPendingUserMessages,
       signal: abortControllerRef.current.signal,
-      onEntry: (entry) => appendTranscriptEntry(sessionPaths, entry),
-    }).then(async (transcript) => {
+      onEntry: (entry: TranscriptEntry) => appendTranscriptEntry(sessionPaths, entry),
+    };
+    const runner = isPhased
+      ? runPhasedSession({ ...common, interactive })
+      : runSession({ ...common, turnSelector: new RoundRobinSelector() });
+
+    void runner.then(async (transcript) => {
       await writeTranscriptMarkdown(sessionPaths, transcript);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -97,6 +127,9 @@ export function App({ task, team, config, sessionPaths }: AppProps): React.React
       abortControllerRef.current.abort();
       return;
     }
+    // "/approve" is not special-cased here — it's queued like any other message and
+    // phasedSession.ts recognizes it as the human side of the design-approval gate while
+    // still rendering it as a normal [You] transcript entry.
     pendingRef.current.push(trimmed);
   }, []);
 
@@ -108,19 +141,29 @@ export function App({ task, team, config, sessionPaths }: AppProps): React.React
     return undefined;
   }, [ended, exit]);
 
+  const runningList = Array.from(running.values());
+
   return (
     <Box flexDirection="column">
       <Static items={entries}>{(entry, i) => <TranscriptLine key={i} entry={entry} />}</Static>
 
-      {status && (
-        <Box>
-          <Text dimColor>
-            <Spinner type="dots" /> {status.agent.displayName ?? status.agent.role} (
-            {status.agent.harness}
-            {status.agent.model ? `/${status.agent.model}` : ""}) is thinking... <ElapsedTimer startedAt={status.startedAt} />
+      {isPhased && phaseInfo && !ended && (
+        <Box marginBottom={1}>
+          <Text bold dimColor>
+            ─── サイクル{phaseInfo.cycle} — {PHASE_LABELS[phaseInfo.phase]} ───
           </Text>
         </Box>
       )}
+
+      {runningList.map(({ agent, startedAt }) => (
+        <Box key={agent.id}>
+          <Text dimColor>
+            <Spinner type="dots" /> {agent.displayName ?? agent.role} (
+            {agent.harness}
+            {agent.model ? `/${agent.model}` : ""}) is thinking... <ElapsedTimer startedAt={startedAt} />
+          </Text>
+        </Box>
+      ))}
 
       {ended && (
         <Box marginTop={1}>
@@ -133,7 +176,12 @@ export function App({ task, team, config, sessionPaths }: AppProps): React.React
       {!ended && interactive && (
         <Box>
           <Text dimColor>&gt; </Text>
-          <TextInput value={input} onChange={setInput} onSubmit={submit} placeholder="type to interject, /quit to stop" />
+          <TextInput
+            value={input}
+            onChange={setInput}
+            onSubmit={submit}
+            placeholder={isPhased ? "type to interject, /approve to approve design, /quit to stop" : "type to interject, /quit to stop"}
+          />
         </Box>
       )}
     </Box>

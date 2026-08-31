@@ -26,17 +26,29 @@ export interface TurnSelector {
   next(state: TurnSelectorState): AgentConfig | null;
 }
 
-export interface StatusEvent {
-  agent: AgentConfig;
-  state: "running";
-  startedAt: number;
-}
+export type SessionEndReason =
+  | "max-turns"
+  | "stop-keyword"
+  | "error-limit"
+  | "interrupted"
+  | "no-agents"
+  | "max-cycles"
+  | "design-not-approved";
 
-export type SessionEndReason = "max-turns" | "stop-keyword" | "error-limit" | "interrupted" | "no-agents";
+/** design: manager⇔designer approval loop. work: worker round-robin. review: parallel
+ *  reviewer/security-advisor pass. Only emitted by runPhasedSession. */
+export type SessionPhase = "design" | "work" | "review";
 
 export interface SessionBusEvents {
   "entry-added": (entry: TranscriptEntry) => void;
-  "status-changed": (status: StatusEvent | null) => void;
+  /** An agent's turn started running. Multiple can be concurrently "started" without an
+   *  intervening "turn-ended" during the phased review step (reviewer + security-advisor
+   *  run in parallel) — consumers should track a set of in-flight agent ids, not a single
+   *  nullable status. */
+  "turn-started": (agent: AgentConfig, startedAt: number) => void;
+  "turn-ended": (agentId: string) => void;
+  /** Only emitted by runPhasedSession; consumers of runSession (flat) never see this. */
+  "phase-changed": (info: { phase: SessionPhase; cycle: number }) => void;
   "session-end": (info: { reason: SessionEndReason }) => void;
 }
 

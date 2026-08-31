@@ -1,20 +1,29 @@
 version: 1
-maxTurns: 20
-stopKeyword: "<<DONE>>"
+orchestration: phased   # manager<->designer approval loop -> worker round-robin -> parallel review -> back to manager
+maxTurns: 20            # per-phase turn cap (design loop, and each work-phase round)
+maxCycles: 5            # safety valve for the outer design->work->review loop
+stopKeyword: "<<DONE>>"               # a worker signals "my chunk is done" with this during the work phase
+designApprovalKeyword: "<<DESIGN_APPROVED>>"  # the manager signals the plan is ready with this
+requireHumanApproval: true   # interactive sessions also need you to type /approve; auto-satisfied in non-interactive runs
 perTurnTimeoutMs: 300000
 onFailure: skip
 turnSelector: round-robin
+phases:
+  manager: manager
+  designer: designer
+  workers: [worker-qwen, worker-pi, worker-opencode]
+  reviewers: [reviewer, security-advisor]
 agents:
   - id: manager
     agentFile: agents/manager/AGENT.md
   - id: designer
     agentFile: agents/designer/AGENT.md
-  - id: builder-qwen
-    agentFile: agents/builder-qwen/AGENT.md
-  - id: builder-pi
-    agentFile: agents/builder-pi/AGENT.md
-  - id: builder-opencode
-    agentFile: agents/builder-opencode/AGENT.md
+  - id: worker-qwen
+    agentFile: agents/worker-qwen/AGENT.md
+  - id: worker-pi
+    agentFile: agents/worker-pi/AGENT.md
+  - id: worker-opencode
+    agentFile: agents/worker-opencode/AGENT.md
   - id: reviewer
     agentFile: agents/reviewer/AGENT.md
   - id: security-advisor

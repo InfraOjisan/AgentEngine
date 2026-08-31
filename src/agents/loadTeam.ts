@@ -55,6 +55,15 @@ export async function loadTeam(teamFilePath: string): Promise<LoadedTeam> {
     }
   }
 
+  if (config.orchestration === "phased" && config.phases) {
+    const referencedIds = [config.phases.manager, config.phases.designer, ...config.phases.workers, ...config.phases.reviewers];
+    for (const id of referencedIds) {
+      if (!seenIds.has(id)) {
+        errors.push(`phases block references agent id "${id}", which is not listed under agents:`);
+      }
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error(`team config has ${errors.length} problem(s):\n- ${errors.join("\n- ")}`);
   }

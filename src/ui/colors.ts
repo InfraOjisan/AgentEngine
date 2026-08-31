@@ -3,9 +3,9 @@
 const ROLE_COLOR_NAMES: Record<string, string> = {
   manager: "cyan",
   designer: "blue",
-  "builder-qwen": "green",
-  "builder-pi": "magenta",
-  "builder-opencode": "cyanBright",
+  "worker-qwen": "green",
+  "worker-pi": "magenta",
+  "worker-opencode": "cyanBright",
   reviewer: "yellow",
   "security-advisor": "red",
 };

@@ -41,13 +41,58 @@ agentengine doctor
 agentengine team list
 
 # 5. セッション開始（実端末=TTYで実行すると、色分けチャット＋
-#    ステータス行＋割り込み入力ボックス付きのInk UIが起動する。
+#    フェーズ表示＋ステータス行＋割り込み入力ボックス付きのInk UIが起動する。
 #    パイプ/CI経由など非TTYの場合は自動でプレーンなコンソール出力にフォールバックする）
 agentengine run "このプロジェクトの認証まわりを見直したい"
 ```
 
-セッション中は `<<DONE>>`（`team.yaml`の`stopKeyword`）を含む返信が出るか、`maxTurns`に達すると終了します。
-対話UIでは入力ボックスに文章を打ってEnterで会話に割り込めます（`/quit`で終了）。
+## オーケストレーション方式（`team.yaml`の`orchestration`）
+
+`orchestration: round-robin`（既定値）と `orchestration: phased`（`agentengine init`が生成する既定
+team.yamlはこちら）の2方式がある。
+
+### `round-robin` — 汎用フラット方式
+全エージェントを`agents:`記載順に単純ラウンドロビン。いずれかの返信に`stopKeyword`（既定
+`<<DONE>>`）が単独行として出現するか`maxTurns`に達すると終了。
+
+### `phased` — 開発特化・フェーズ型方式
+実際の開発組織（PM・設計・実装・レビュー・セキュリティ）を模した3フェーズのループ。`team.yaml`の
+`phases`ブロックで各エージェントIDを`manager` / `designer` / `workers: [...]` / `reviewers: [...]`
+に割り当てる。
+
+```
+①設計 (manager ⇔ designer)
+  managerが設計に納得したら <<DESIGN_APPROVED>> を単独行で返信
+  + 人間が対話UIで /approve を入力（非対話モードでは自動的に満たされたものとして扱う）
+  → 両方揃うまでmanagerとdesignerが交互に発言し続ける
+      │
+      ▼ 承認
+②実装 (worker のラウンドロビン)
+  各workerは担当分を実装しつつ他workerの投稿を簡易レビュー
+  正常終了: いずれかの返信に stopKeyword（既定 <<DONE>>）が単独行で出現 → ③へ
+  異常終了: maxTurns到達 / 同一worker3連続失敗 / onFailure:halt → ①へ差し戻し（サイクル消費）
+      │
+      ▼ 正常終了
+③レビュー・セキュリティ監査 (reviewer + security-advisor を並列実行)
+  互いの出力は見えない独立した監査。結果は常に①（manager）へ戻る
+      │
+      ▼
+   ①へ戻って次サイクル … maxCycles到達 or 人間の /quit・Ctrl-C で終了
+```
+
+「workerに指示を出せるのはmanagerだけ」という現実の開発チームを模した設計で、`agentengine init`
+既定チームでは判断系ロール（manager/designer/reviewer/security-advisor）をClaude Code(Opus)と
+Codex CLIが、実装系ロール（worker-qwen/worker-pi/worker-opencode）をQwen Code/pi/opencodeが担当する。
+
+- `maxTurns` はフェーズ①・②それぞれの1回あたりの上限。
+- `maxCycles` は①→②→③の外周ループ全体の安全弁（異常終了で①へ差し戻された回もサイクル数として消費されるため無限ループしない）。
+- `designApprovalKeyword`（既定`<<DESIGN_APPROVED>>`）はmanagerの設計承認シグナル。`stopKeyword`は
+  ②のworkerが「自分の担当分が完了した」ことを示すシグナルとして再利用される。
+- 停止キーワードの検出は**単独行として出現した場合のみ**（`hasControlLine`）。文中で言及しただけ
+  （例: 「まだ`<<DONE>>`は出していません」）では誤検知しない。
+
+対話UIでは入力ボックスに文章を打ってEnterで会話に割り込めます。`/quit`で強制終了、`phased`方式では
+`/approve`で設計フェーズの人間承認を行います。
 
 ## デフォルトのチーム構成（人間の組織を模した2階層）
 
@@ -55,32 +100,51 @@ agentengine run "このプロジェクトの認証まわりを見直したい"
 
 - **品質・判断ティア**（推論力重視・少数精鋭）: `manager` / `designer` / `reviewer` / `security-advisor`
   — Claude Code（Opus）とCodex CLIが担当し、方針決定・設計・最終レビュー・セキュリティ監査を行う。
-- **量産ティア**（ボリュームのある実作業）: `builder-qwen` / `builder-pi` / `builder-opencode`
+- **量産ティア**（ボリュームのある実作業）: `worker-qwen` / `worker-pi` / `worker-opencode`
   — Qwen Code / pi / opencode の3ハーネスがそれぞれ独立してコード生成・文書作成を担当し、
-  各自のペルソナに「他の2人のBuilderの直近の投稿を簡単にレビューする」責務を持たせることで、
-  ラウンドロビンの会話の中で自然にBuilder同士の相互レビューが起きるようにしてある。
+  各自のペルソナに「他の2人のWorkerの直近の投稿を簡単にレビューする」責務を持たせることで、
+  ②のラウンドロビンの中で自然にWorker同士の相互レビューが起きるようにしてある。
 
-ラウンドロビンの順序は `manager → designer → builder-qwen → builder-pi → builder-opencode →
-reviewer → security-advisor` で、Managerが指示 → Designerが設計 → 3人のBuilderが実装＋相互レビュー
-→ Reviewer/Security Advisorが最終ゲート、という一巡になるよう並べています。役割・ハーネス・モデルの
-組み合わせは`team.yaml`/`agents/*/AGENT.md`で自由に編集できます。
+役割・ハーネス・モデルの組み合わせ、`phases`ブロックのメンバー構成は`team.yaml`/`agents/*/AGENT.md`
+で自由に編集できる。
 
 ## 設定ファイル
 
-- **`team.yaml`**: エージェントの並び順（ラウンドロビン）とセッション全体の設定
-  （`maxTurns` / `stopKeyword` / `perTurnTimeoutMs` / `onFailure: skip|halt`）。
+- **`team.yaml`**: エージェントの並び順とセッション全体の設定
+  （`orchestration` / `maxTurns` / `maxCycles` / `stopKeyword` / `designApprovalKeyword` /
+  `requireHumanApproval` / `perTurnTimeoutMs` / `onFailure: skip|halt` / `phases`）。
 - **`agents/<role>/AGENT.md`**: 各エージェントの役割・ハーネス・モデル・ペルソナ本文。
   role/harness/model/toolsEnabled はここのfrontmatterが正であり、`team.yaml`側では二重管理しない。
 
+```yaml
+version: 1
+orchestration: phased
+maxTurns: 20
+maxCycles: 5
+stopKeyword: "<<DONE>>"
+designApprovalKeyword: "<<DESIGN_APPROVED>>"
+requireHumanApproval: true
+onFailure: skip
+phases:
+  manager: manager
+  designer: designer
+  workers: [worker-qwen, worker-pi, worker-opencode]
+  reviewers: [reviewer, security-advisor]
+agents:
+  - id: manager
+    agentFile: agents/manager/AGENT.md
+  # ...
+```
+
 ```markdown
 ---
-role: builder-qwen
+role: worker-qwen
 harness: qwen
-displayName: "Builder (Qwen Code)"
+displayName: "Worker (Qwen Code)"
 toolsEnabled: false   # true にするとファイル編集等のツール実行を許可（既定は安全なチャット専用モード）
 ---
 
-あなたはこのチームのBuilderです。...
+あなたはこのチームのWorkerです。……
 ```
 
 ## セッションの保存先
@@ -106,10 +170,14 @@ toolsEnabled: false   # true にするとファイル編集等のツール実行
   解消する見込み（このセッションでは未検証）。エラーは`[ERROR]`として記録され、
   `onFailure: skip`のままなら他のエージェントの進行は妨げない。
 
+`phased`方式は実機で以下を確認済み: 設計承認ループ、workerラウンドロビンと`<<DONE>>`検出、
+異常終了時の①への差し戻しと`maxCycles`による強制終了、reviewer/security-advisorの並列実行
+（開始タイムスタンプの近接と、宣言順での決定的な結果表示を確認）、Ink UI上でのフェーズ
+バッジ・複数同時ステータス行の表示。
+
 ## 未実装（今後の拡張）
 
-- マネージャー主導のターン選択（現状はラウンドロビン固定。`TurnSelector`インターフェースは
-  拡張できるよう用意済み）
 - ハーネス側のネイティブセッション継続（`--resume`等）を使った会話の再開
 - 分割ペイン・コスト集計付きの本格ダッシュボード（`SessionBus`イベント経由で疎結合に
   拡張できる設計にしてある）
+- `phased`方式のサイクルをまたいだ要約（現状は直近ターンの単純カットのみ）
