@@ -1,0 +1,21 @@
+version: 1
+maxTurns: 20
+stopKeyword: "<<DONE>>"
+perTurnTimeoutMs: 300000
+onFailure: skip
+turnSelector: round-robin
+agents:
+  - id: manager
+    agentFile: agents/manager/AGENT.md
+  - id: designer
+    agentFile: agents/designer/AGENT.md
+  - id: builder-qwen
+    agentFile: agents/builder-qwen/AGENT.md
+  - id: builder-pi
+    agentFile: agents/builder-pi/AGENT.md
+  - id: builder-opencode
+    agentFile: agents/builder-opencode/AGENT.md
+  - id: reviewer
+    agentFile: agents/reviewer/AGENT.md
+  - id: security-advisor
+    agentFile: agents/security-advisor/AGENT.md
